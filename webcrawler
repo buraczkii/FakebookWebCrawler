@@ -1,0 +1,7 @@
+#! /usr/bin/env python
+
+import time
+
+print("hello i am the webcrawler\n")
+time.sleep(2)
+print("goodbye")
