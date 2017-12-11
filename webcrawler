@@ -1,7 +1,139 @@
-#! /usr/bin/env python
+#! /usr/bin/env python3
 
-import time
+from collections import deque
+import http.cookiejar
+import socket
+import sys
+import urllib.request
+import util
 
-print("hello i am the webcrawler\n")
-time.sleep(2)
-print("goodbye")
+USAGE_INFO = "\nUsage:\t ./webcrawler <username> <password>\n"
+
+HOST_DOMAIN = "cs5700sp15.ccs.neu.edu"
+HOST_URL = "http://" + HOST_DOMAIN
+HOME_PATH = '/fakebook/'
+
+SOCKET_TIMEOUT = 3
+MAX_RETRIES = 3
+
+INTERNAL_SERVER_ERROR_CODE = 500
+
+class FakebookCrawler:
+    def __init__(self):
+        self.cookie_jar = http.cookiejar.CookieJar()
+        self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.cookie_jar))
+        self.paths_visited = set()
+        self.paths_ignored = set()
+        self.user_count = 0
+        self.unsuccessful_request_urls = []
+        socket.setdefaulttimeout(SOCKET_TIMEOUT)
+
+
+    def crawl(self, username, password):
+        util.log("Starting web crawler for FakeBook.")
+        try:
+            response = self.login(username, password)
+            util.log("Successfully logged in.")
+            start_links = self.extract_links(response)
+            self.visit_all_links(start_links)
+        except Exception as e:
+            util.log("ERROR: " + str(e))
+            sys.exit(1)
+        finally:
+            self.finish()
+
+
+    def login(self, username, password):
+        response = self.make_http_request(urllib.request.Request(HOST_URL + HOME_PATH))
+        login_url = response.url
+        self.paths_visited.add('/fakebook/')
+
+        crsf_token = self.cookie_jar._cookies[HOST_DOMAIN]['/']['csrftoken'].value
+        session_id = self.cookie_jar._cookies[HOST_DOMAIN]['/']['sessionid'].value
+        util.log("Cookie: {crsf_token: "+str(crsf_token)+", session_id: "+str(session_id)+"}")
+
+        data = {'username': username, 'password': password, 'csrfmiddlewaretoken': crsf_token}
+        encoded_data = urllib.parse.urlencode(data).encode('ascii')
+        response = self.make_http_request(urllib.request.Request(login_url, encoded_data))
+        if response.url == login_url:
+            raise Exception("Unable to login. Please check your credentials.")
+        return response
+
+
+    def visit_all_links(self, start_links):
+        util.log("Starting to visit links ... ")
+        self.paths_visited.update(start_links)
+        q = deque(start_links)
+        while q:
+            path = q.pop()
+            self.increment_count_if_user(path)
+            url = HOST_URL + path
+            response = self.make_http_request(urllib.request.Request(url))
+            if not response: continue
+            children = self.extract_links(response)
+
+            for child in children:
+                if not child in self.paths_visited:
+                    q.appendleft(child)
+                    self.paths_visited.add(child)
+
+
+    def increment_count_if_user(self, path):
+        subpath = path[path.index(HOME_PATH) + len(HOME_PATH):]
+        if subpath and not "friends" in path: self.user_count += 1
+
+
+    def extract_links(self, response):
+        parser = util.MyHTMLParser()
+        parser.feed(str(response.read()))
+        self.paths_ignored.update(parser.external_links) # don't want to visit external links
+        return parser.internal_links
+
+
+    def make_http_request(self, request):
+        attempt = 0
+        url = str(request.full_url)
+        error = ""
+
+        while attempt < MAX_RETRIES:
+            try:
+                return self.opener.open(request)
+            except socket.timeout:
+                error = "Socket timeout."
+            except urllib.error.HTTPError as e:
+                error = "HTTP response code" + str(e.code) + ": " + str(e.reason)
+                if not (e.code == INTERNAL_SERVER_ERROR_CODE): break
+            except Exception as e:
+                error = str(e)
+                break
+            attempt += 1
+        self.unsuccessful_request_urls.append(url)
+        util.log("Unable to visit url: " + url + ", due to error: " + error)
+
+
+    def finish(self):
+        final_msg = []
+        final_msg.append("Finished crawling FakeBook. Stats:\n\n")
+        final_msg.append("\tNumber of users visited: " + str(self.user_count) + "\n")
+
+        if self.paths_ignored:
+            final_msg.append("\tList of urls that the crawler ignored:\n")
+            final_msg += [("\t\t- " + url + "\n") for url in self.paths_ignored]
+        final_msg.append("\n")
+
+        if self.unsuccessful_request_urls:
+            final_msg.append("\tList of urls that the crawler was unable to visit:\n")
+            final_msg += [("\t\t- " + url + "\n") for url in self.unsuccessful_request_urls]
+        final_msg.append("\n")
+
+        util.log(''.join(final_msg))
+
+
+# run the crawler
+if __name__ == '__main__':
+    if len(sys.argv) != 3:
+        print(USAGE_INFO)
+        sys.exit(1)
+    username = sys.argv[1]
+    password = sys.argv[2]
+    FakebookCrawler().crawl(username, password)
